@@ -1,0 +1,11 @@
+# datasets (too large for GitHub)
+*.tsv
+**/src/train/
+**/src/test/
+dataset/
+# generated artefacts
+code/business_entity_resolution/model/
+code/business_entity_resolution/output/
+*.log
+__pycache__/
+.claude/

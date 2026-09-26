@@ -1,0 +1,8 @@
+# Python 3.14.0 (tested on Windows 11, 16 cores, 16 GB RAM)
+numpy==2.4.0
+pandas==3.0.3
+pyarrow==25.0.1
+scipy==1.17.1
+scikit-learn==1.8.0
+lightgbm==4.7.0
+rapidfuzz==3.14.6
