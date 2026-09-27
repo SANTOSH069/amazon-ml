@@ -82,6 +82,7 @@ Files: `io_utils.py`, `translit.py`, `normalize.py`, `prepare.py`
    - target address spelling to Source 1 spelling, for example `texas` to `tx`, `keralam` to `kerala`, `aenue` to `ave`
 3. Normalise: All records are cleaned in parallel:
    - Indic scripts are converted to Latin letters and accents removed.
+
    - Aliases (`X dba Y` keeps `Y`) and website names are resolved.
    - Leetspeak (`5ecure` becomes `secure`) and abbreviations (`Pvt Ltd` becomes `private limited`) are standardised.
    - Honorifics, filler words and repeated words are dropped.
@@ -136,7 +137,7 @@ Files: `features.py`, `resolver.py`
 [eval] held-out S1=441521  macro F0.5=0.9756  candidate recall=0.9655  candidates/S1=4.14
 ```
 
-The `[eval]` line is the honest score, measured on Source 1 entities that were never used for training or tuning.
+The `[eval]` line is the honest score, measured on Source 1 entities that were never used for trainings or tunings.
 
 ### Stage 4: Output
 
