@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--model", default=None, help="default: model/resolver.pkl in the project")
     parser.add_argument("--mode", choices=["all", "fit", "predict"], default="all")
     parser.add_argument("--top-k", type=int, default=5, help="blocking: Source 1 candidates kept per target")
-    parser.add_argument("--target-recall", type=float, default=0.995,
+    parser.add_argument("--target-recall", type=float, default=0.998,
                     help="share of blocking true pairs the candidate filter must keep")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

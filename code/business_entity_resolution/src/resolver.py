@@ -93,7 +93,7 @@ def ids_by_source1(source1_rows, ids, source1_ids):
 
 
 class Resolver:
-    def __init__(self, top_k=5, target_recall=0.995, seed=42, log=print):
+    def __init__(self, top_k=5, target_recall=0.998, seed=42, log=print):
         self.top_k = top_k
         self.target_recall = target_recall
         self.seed = seed
@@ -174,7 +174,7 @@ class Resolver:
         self.filter_columns = list(filter_feats.columns)
         train_rows = np.flatnonzero(pair_group == FIT)
         train_rows = rng.choice(train_rows, size=min(len(train_rows), 8_000_000), replace=False)
-        self.candidate_filter = new_lightgbm(150, self.seed).fit(filter_feats.iloc[train_rows],
+        self.candidate_filter = new_lightgbm(200, self.seed).fit(filter_feats.iloc[train_rows],
                                                                  is_match[train_rows])
         filter_prob = predict_in_chunks(self.candidate_filter, filter_feats)
         tune_positive = np.sort(filter_prob[(pair_group == TUNE) & is_match])
@@ -197,7 +197,7 @@ class Resolver:
         self.matcher_columns = list(feats.columns)
         train_rows = np.flatnonzero(pair_group == FIT)
         train_rows = rng.choice(train_rows, size=min(len(train_rows), 8_000_000), replace=False)
-        self.matcher = new_lightgbm(400, self.seed).fit(feats.iloc[train_rows], is_match[train_rows])
+        self.matcher = new_lightgbm(600, self.seed).fit(feats.iloc[train_rows], is_match[train_rows])
         prob = predict_in_chunks(self.matcher, feats)
         self.log(f"[match] features {feats.shape} trained {time.time() - started:.0f}s")
         ranked = sorted(zip(self.matcher.feature_importances_, self.matcher_columns), reverse=True)
@@ -207,7 +207,7 @@ class Resolver:
             candidates.target.values, candidates.source1.values, prob)
         correct = owner[best_target] == best_s1
         best = (-1.0, 0.5)
-        for threshold in np.round(np.arange(0.05, 0.99, 0.01), 2):
+        for threshold in np.round(np.arange(0.05, 0.99, 0.005), 3):
             score = group_f05(best_target, best_s1, best_prob, correct, threshold, group, actual, TUNE)
             if score > best[0]:
                 best = (score, float(threshold))

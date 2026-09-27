@@ -15,7 +15,7 @@ We treat the task as a question asked of every Source 2/3 record: which Source 1
 3. Matching model: A LightGBM model with 52 similarity and frequency features. The frequency features are what separate look-alike decoy businesses from true matches.
 4. Decision rule: Each Source 2/3 record goes to at most one Source 1 entity, using a threshold tuned for macro F0.5.
 
-On 441,521 training Source 1 entities that were never used for training or tuning, the pipeline reaches **macro F0.5 = 0.9753**. Its running time grows linearly with the data: the 1.73 million entity test set is resolved in about 15 minutes on a 16-core machine.
+On 441,521 training Source 1 entities that were never used for training or tuning, the pipeline reaches **macro F0.5 = 0.9756**. Its running time grows linearly with the data: the 1.73 million entity test set is resolved in about 18 minutes on a 16-core machine.
 
 ## 2. Methodology
 
@@ -130,14 +130,14 @@ Recall improvement: Each change came from studying the true pairs that were miss
   - token set and plain ratio similarity on the core name and address
   - house number agreement
   - website, script and missing-address flags
-- Cutoff: A probability of at least 0.0627, set on the tune group to keep 99.5% of the step one true pairs.
+- Cutoff: A probability of at least 0.0618, set on the tune group to keep 99.5% of the step one true pairs.
 
 ### 3.4 Blocking results
 
 | | Train (all 2.21 million Source 1) | Test (1.73 million Source 1) |
 |---|---|---|
-| Step one pool | 16,920,627 pairs (7.67 per Source 1), recall 0.9704 | 18,193,499 pairs (10.50 per Source 1) |
-| Final candidates (`candidate_pairs.tsv`) | **9,132,195 (4.14 per Source 1)** | **8,174,707 (4.72 per Source 1)** |
+| Step one pool | 16,921,294 pairs (7.67 per Source 1), recall 0.9704 | 18,194,128 pairs (10.50 per Source 1) |
+| Final candidates (`candidate_pairs.tsv`) | **9,134,550 (4.14 per Source 1)** | **8,176,824 (4.72 per Source 1)** |
 | Blocking recall (true pairs among the candidates) | **0.9655** | no labels |
 | Reduction ratio against all Source 1 by Source 2/3 pairs | 0.9999996 | 0.9999995 |
 
@@ -178,7 +178,7 @@ The test set has more Source 2/3 records per Source 1 entity (5.75 against 4.68 
 ### 4.3 Threshold selection and decision rule
 
 1. One entity per record: Each Source 2/3 record keeps only its most likely Source 1 candidate, because no record belongs to two entities in the training labels.
-2. Threshold: The match is accepted if its probability is at least 0.71. This value comes from a grid search from 0.05 to 0.98 that maximises macro F0.5 on the tune group, singletons included.
+2. Threshold: The match is accepted if its probability is at least 0.69. This value comes from a grid search from 0.05 to 0.98 that maximises macro F0.5 on the tune group, singletons included.
 3. Result per entity: A Source 1 entity's matches are the Source 2/3 records that chose it. If none did, its list stays empty.
 
 ## 5. Results and Error Analysis
@@ -189,14 +189,15 @@ All numbers below are for the final model on the eval group (441,521 Source 1 en
 
 | Metric | Value |
 |---|---|
-| **Macro F0.5 (official metric)** | **0.9753** |
+| **Macro F0.5 (official metric)** | **0.9756** |
 | Precision (pair level) | 0.9955 |
 | Recall (pair level) | 0.9446 |
 | Blocking recall | 0.9655 |
 | Matching model recall on candidates | 0.9784 |
 | Source 1 entities predicted exactly right | 83.0% |
-| Singletons correctly left empty | 97.9% |
-| Macro F0.5 on the tune group | 0.9750 |
+| Singletons correctly left empty | 97.9% (24,105 of 24,628) |
+| Macro F0.5 on the fit group | 0.9764 |
+| Macro F0.5 on the tune group | 0.9752 |
 
 ### 5.2 Confusion matrix (pair level)
 
@@ -260,7 +261,7 @@ Blocking received the most engineering effort.
 - Evidence:
   - Top-5 recall rose from 0.9499 to 0.9704.
   - The final candidate set is only 4.14 per Source 1 entity, just above the 3.46 true matches per entity.
-  - Block purging keeps running time linear: test blocking of 1.73 million by 9.97 million records takes about 6 minutes, with a reduction ratio of 0.9999995.
+  - Block purging keeps running time linear: test blocking of 1.73 million by 9.97 million records takes about 9 minutes, with a reduction ratio of 0.9999995.
 
 ### Explore string similarity features (Jaccard, Levenshtein, TF-IDF cosine)
 
@@ -334,7 +335,7 @@ Blocking received the most engineering effort.
   - Normalisation runs in parallel across processes.
   - The blocking join is a sorted-array hash join with capped block sizes, run in 8 threads.
   - String similarities use rapidfuzz's multithreaded C++ code.
-  - Training takes about 20 minutes and test inference about 15 minutes on 16 cores with 16 GB RAM.
+  - Training takes about 23 minutes and test inference about 18 minutes on 16 cores with 16 GB RAM.
 - Reproducibility: One seed (42) controls the group split and the models. The trained model is saved to `model/resolver.pkl`, and `--mode predict` reproduces the test outputs without retraining.
 - Limitations and next steps:
   - Blocking loses 3.45% of true pairs, mostly records with no address and a generic name.
@@ -349,7 +350,7 @@ Measuring the noise before modelling paid off:
 - Decoys: Frequency features were the most valuable single idea against the look-alike businesses that F0.5 penalises most.
 - New countries: The design never relies on the country label, so it carries over to France without changes.
 
-The final pipeline reaches a macro F0.5 of **0.9753** on held-out data with **99.55% precision**.
+The final pipeline reaches a macro F0.5 of **0.9756** on held-out data with **99.55% precision**.
 
 ## Appendix
 
@@ -359,7 +360,7 @@ The final pipeline reaches a macro F0.5 of **0.9753** on held-out data with **99
 <team_name>_submission.zip
 ├── output/
 │   ├── matching_results.tsv        final matches (1,732,544 rows)
-│   └── candidate_pairs.tsv         blocking candidate set (8,174,707 pairs)
+│   └── candidate_pairs.tsv         blocking candidate set (8,176,824 pairs)
 ├── code/business_entity_resolution/
 │   ├── src/                        all source code (8 modules)
 │   ├── README.md                   how to reproduce the pipeline from data to output
@@ -388,4 +389,4 @@ The final pipeline reaches a macro F0.5 of **0.9753** on held-out data with **99
 | Source 3 | 5,285,603 | 5,082,316 |
 | Empty Source 2 and Source 3 addresses | 3.4% and 3.3% | 2.6% and 2.7% |
 
-Test output: 5,778,917 matches (3.34 per Source 1 entity). 1,627,807 entities have at least one match and 104,737 are empty.
+Test output: 5,776,256 matches (3.33 per Source 1 entity). 1,627,740 entities have at least one match and 104,804 are empty.

@@ -54,7 +54,7 @@ From `code/business_entity_resolution/`:
 python src/main.py
 ```
 
-On the reference machine this takes about 35 minutes: roughly 20 to train and 15 to resolve the test set. At the end the output files are checked against the submission rules, and the run prints `[validate] PASS`.
+On the reference machine this takes about 41 minutes: roughly 23 to train and 18 to resolve the test set. At the end the output files are checked against the submission rules, and the run prints `[validate] PASS`.
 
 To also run the official validator (it ships with `student_resource/`), run this from the submission root:
 
@@ -110,7 +110,7 @@ Files: `blocking.py`, then `features.py` and `resolver.py`
 
 ```
 [block] pool=16920627 (7.67/S1) recall=0.9704
-[filter] cutoff=0.0627 kept 9132195 (4.14/S1) recall of pool=0.9950 overall=0.9655
+[filter] cutoff=0.0618 kept 9134550 (4.14/S1) recall of pool=0.9950 overall=0.9655
 ```
 
 On the test set this gives 4.72 candidates per Source 1 entity. France is handled as its own country partition.
@@ -132,8 +132,8 @@ Files: `features.py`, `resolver.py`
    - The match is kept if its probability reaches the threshold chosen on the tune group to maximise macro F0.5, singletons included.
 
 ```
-[tune] threshold=0.71 tune F0.5=0.9750
-[eval] held-out S1=441521  macro F0.5=0.9753  candidate recall=0.9655  candidates/S1=4.14
+[tune] threshold=0.69 tune F0.5=0.9752
+[eval] held-out S1=441521  macro F0.5=0.9756  candidate recall=0.9655  candidates/S1=4.14
 ```
 
 The `[eval]` line is the honest score, measured on Source 1 entities that were never used for training or tuning.
@@ -147,7 +147,7 @@ Files: `main.py`, `io_utils.py`
 - Check against the rules: The rules include that every match also appears in the candidate list.
 
 ```
-[test] S1=1732544 candidates=8174707 (4.72/S1) matches=5778917 (3.34/S1) non-empty=1627807
+[test] S1=1732544 candidates=8176824 (4.72/S1) matches=5776256 (3.33/S1) non-empty=1627740
 [validate] PASS
 ```
 
@@ -157,7 +157,7 @@ Files: `main.py`, `io_utils.py`
 |---|---|
 | `python src/main.py` | trains, then resolves the test set (full reproduction) |
 | `python src/main.py --mode fit` | trains only; prints the held-out score and saves `model/resolver.pkl` |
-| `python src/main.py --mode predict` | resolves the test set with the saved model (about 15 minutes) |
+| `python src/main.py --mode predict` | resolves the test set with the saved model (about 18 minutes) |
 
 | Option | Default | Meaning |
 |---|---|---|
