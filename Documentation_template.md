@@ -1,8 +1,10 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
-**Team Name:** [Your Team Name]  
-**Team Members:** [List all team members]  
-**Submission Date:** [Date]
+| | |
+|---|---|
+| **Team Name** | Beyond Bias |
+| **Team Members** | Vedha Shree · Venkata Santosh · Sree Venkatanadh · Venkata Thanush |
+| **Submission Date** | 27 September 2026 |
 
 ---
 
