@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from translit import INDIC_RE, has_indic, romanize_word
+from translit import has_indic, romanize_word
 
 NAME_CANON = {
     "corp": "corporation", "corpn": "corporation", "co": "company", "cos": "company",
@@ -58,124 +58,126 @@ TOKEN = re.compile(r"[a-z0-9]+")
 LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b"})
 ORDINAL = re.compile(r"^\d+(st|nd|rd|th)$")
 DIGITS = re.compile(r"\d+")
-INDIC_RUN = re.compile(r"[ऀ-෿]+")
+INDIC_RUN = re.compile(r"[\u0900-\u0DFF]+")
 
 
-def fold(s):
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return s.encode("ascii", "ignore").decode("ascii").lower()
+def fold(text):
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return text.encode("ascii", "ignore").decode("ascii").lower()
 
 
-def latinize(s, native):
-    if not has_indic(s):
-        return s
-    return INDIC_RUN.sub(lambda m: " " + (native.get(m.group(0)) or romanize_word(m.group(0))) + " ", s)
+def to_latin(text, indic_words):
+    if not has_indic(text):
+        return text
+    return INDIC_RUN.sub(
+        lambda m: " " + (indic_words.get(m.group(0)) or romanize_word(m.group(0))) + " ", text)
 
 
-def _fix_leet(t):
-    if t.isdigit() or t.isalpha() or ORDINAL.match(t):
-        if t.startswith("l") and len(t) > 2 and t[1] in "nmdt" and t not in ("lt", "ltd", "llc", "llp"):
-            return "i" + t[1:]
-        return t
-    letters = sum(c.isalpha() for c in t)
-    if letters >= 2 and len(t) - letters <= 2:
-        return t.translate(LEET)
-    return t
+def fix_leetspeak(word):
+    if word.isdigit() or word.isalpha() or ORDINAL.match(word):
+        if word.startswith("l") and len(word) > 2 and word[1] in "nmdt" and word not in ("lt", "ltd", "llc", "llp"):
+            return "i" + word[1:]
+        return word
+    letters = sum(c.isalpha() for c in word)
+    if letters >= 2 and len(word) - letters <= 2:
+        return word.translate(LEET)
+    return word
 
 
-def name_parts(raw, native):
-    script = has_indic(raw)
-    s = fold(latinize(raw, native))
-    web = bool(WEB_RE.search(s))
-    if "|" in s:
-        s = s.split("|")[0]
-    alias = False
-    m = ALIAS_RE.search(s)
-    if m:
-        after = s[m.end():]
-        if TOKEN.search(after):
-            s, alias = after, True
-    if web:
-        s = re.sub(r"www\.|\.(?:com|co\.in|in|net|org|fr|biz)\b", " ", s)
-    s = DOTTED.sub(r"\1", s)
-    s = DOTTED.sub(r"\1", s)
-    s = s.replace("&", " and ").replace("+", " and ")
-    toks, seen = [], set()
-    for t in TOKEN.findall(s):
-        t = NAME_CANON.get(_fix_leet(t), _fix_leet(t))
-        if t in HONORIFIC or t in seen:
+def clean_name(raw, indic_words):
+    is_indic = has_indic(raw)
+    text = fold(to_latin(raw, indic_words))
+    is_website = bool(WEB_RE.search(text))
+    if "|" in text:
+        text = text.split("|")[0]
+    is_alias = False
+    alias = ALIAS_RE.search(text)
+    if alias:
+        real_name = text[alias.end():]
+        if TOKEN.search(real_name):
+            text, is_alias = real_name, True
+    if is_website:
+        text = re.sub(r"www\.|\.(?:com|co\.in|in|net|org|fr|biz)\b", " ", text)
+    text = DOTTED.sub(r"\1", text)
+    text = DOTTED.sub(r"\1", text)
+    text = text.replace("&", " and ").replace("+", " and ")
+    words, seen = [], set()
+    for word in TOKEN.findall(text):
+        word = fix_leetspeak(word)
+        word = NAME_CANON.get(word, word)
+        if word in HONORIFIC or word in seen:
             continue
-        seen.add(t)
-        toks.append(t)
-    core = [t for t in toks if t not in LEGAL and t not in GENERIC]
-    if not core:
-        core = toks
-    return " ".join(toks), " ".join(core), alias, web, script
+        seen.add(word)
+        words.append(word)
+    core = [w for w in words if w not in LEGAL and w not in GENERIC] or words
+    return " ".join(words), " ".join(core), is_alias, is_website, is_indic
 
 
 NUMERO = re.compile(r"\b[Nn]\s*[°º]")
 
 
-def addr_parts(raw, native, syn):
-    s = fold(latinize(NUMERO.sub(" no ", raw), native)).replace("#", " no ")
-    s = DOTTED.sub(r"\1", s)
-    toks, seen = [], set()
-    nums = []
-    for t in TOKEN.findall(s):
-        t = ADDR_CANON.get(t, t)
-        t = syn.get(t, t)
-        if t in ADDR_STOP or t in seen:
+def clean_address(raw, indic_words, synonyms):
+    text = fold(to_latin(NUMERO.sub(" no ", raw), indic_words)).replace("#", " no ")
+    text = DOTTED.sub(r"\1", text)
+    words, seen, numbers = [], set(), []
+    for word in TOKEN.findall(text):
+        word = ADDR_CANON.get(word, word)
+        word = synonyms.get(word, word)
+        if word in ADDR_STOP or word in seen:
             continue
-        seen.add(t)
-        toks.append(t)
-        for d in DIGITS.findall(t):
-            d = d.lstrip("0") or "0"
-            if d not in nums:
-                nums.append(d)
-    return toks, nums
+        seen.add(word)
+        words.append(word)
+        for digits in DIGITS.findall(word):
+            digits = digits.lstrip("0") or "0"
+            if digits not in numbers:
+                numbers.append(digits)
+    return words, numbers
 
 
-def _raw_name_tokens(raw):
-    return [t for t in re.split(r"[^\wऀ-෿]+", raw) if t]
+def raw_name_words(raw):
+    return [w for w in re.split(r"[^\w\u0900-\u0DFF]+", raw) if w]
 
 
-def learn_native_dict(s1_names, t_names, min_count=1):
+def learn_indic_words(source1_names, target_names, min_count=1):
     votes = defaultdict(Counter)
-    for a, b in zip(s1_names, t_names):
-        if not has_indic(b):
+    for source1_name, target_name in zip(source1_names, target_names):
+        if not has_indic(target_name):
             continue
-        ta = [NAME_CANON.get(t, t) for t in TOKEN.findall(fold(a))]
-        tb = _raw_name_tokens(b)
-        if len(ta) != len(tb):
+        latin_words = [NAME_CANON.get(w, w) for w in TOKEN.findall(fold(source1_name))]
+        target_words = raw_name_words(target_name)
+        if len(latin_words) != len(target_words):
             continue
-        for x, y in zip(tb, ta):
-            if INDIC_RE.search(x):
-                votes[INDIC_RUN.findall(x)[0] if len(INDIC_RUN.findall(x)) == 1 else x][y] += 1
-    out = {}
-    for w, c in votes.items():
-        y, n = c.most_common(1)[0]
-        if n >= min_count and n / sum(c.values()) >= 0.5:
-            out[w] = y
-    return out
+        for target_word, latin_word in zip(target_words, latin_words):
+            runs = INDIC_RUN.findall(target_word)
+            if runs:
+                votes[runs[0] if len(runs) == 1 else target_word][latin_word] += 1
+    dictionary = {}
+    for word, counts in votes.items():
+        latin_word, count = counts.most_common(1)[0]
+        if count >= min_count and count / sum(counts.values()) >= 0.5:
+            dictionary[word] = latin_word
+    return dictionary
 
 
-def learn_addr_synonyms(s1_tok_lists, t_tok_lists, min_count=30, min_p=0.6, max_rel_df=0.1):
-    df1, dft = Counter(), Counter()
-    cnt, co = Counter(), defaultdict(Counter)
-    for a, b in zip(s1_tok_lists, t_tok_lists):
-        sa, sb = set(a), set(b)
-        df1.update(sa)
-        dft.update(sb)
-        missing = sa - sb
-        for w in sb - sa:
-            cnt[w] += 1
-            co[w].update(missing)
-    syn = {}
-    for w, n in cnt.items():
-        if n < min_count or w.isdigit() or df1[w] > max_rel_df * dft[w] or not co[w]:
+def learn_address_synonyms(source1_word_lists, target_word_lists, min_count=30, min_share=0.6,
+                           max_source1_share=0.1):
+    df_source1, df_target = Counter(), Counter()
+    seen, replaced = Counter(), defaultdict(Counter)
+    for source1_words, target_words in zip(source1_word_lists, target_word_lists):
+        source1_set, target_set = set(source1_words), set(target_words)
+        df_source1.update(source1_set)
+        df_target.update(target_set)
+        missing = source1_set - target_set
+        for word in target_set - source1_set:
+            seen[word] += 1
+            replaced[word].update(missing)
+    synonyms = {}
+    for word, count in seen.items():
+        if (count < min_count or word.isdigit() or not replaced[word]
+                or df_source1[word] > max_source1_share * df_target[word]):
             continue
-        v, k = co[w].most_common(1)[0]
-        if k / n >= min_p and not v.isdigit():
-            syn[w] = v
-    return syn
+        replacement, hits = replaced[word].most_common(1)[0]
+        if hits / count >= min_share and not replacement.isdigit():
+            synonyms[word] = replacement
+    return synonyms

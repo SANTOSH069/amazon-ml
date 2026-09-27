@@ -1,179 +1,191 @@
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import JaroWinkler
 
-KEY_FEATS = ["kscore", "nkeys", "krank", "kbest", "khits"]
+BLOCKING_COLUMNS = ["key_score", "shared_keys", "key_rank", "best_key_score", "source1_hits"]
 
 
-def _cp(a, b, scorer):
-    return process.cpdist(a, b, scorer=scorer, workers=-1, dtype=np.float32)
+def pairwise(left, right, scorer):
+    return process.cpdist(left, right, scorer=scorer, workers=-1, dtype=np.float32)
 
 
-def _num_feats(na, nb):
-    first_eq = np.empty(len(na), np.float32)
-    jac = np.empty(len(na), np.float32)
-    for i, (x, y) in enumerate(zip(na, nb)):
-        if not x or not y:
-            first_eq[i] = jac[i] = -1.0
+def number_features(source1_numbers, target_numbers):
+    first_match = np.empty(len(source1_numbers), np.float32)
+    jaccard = np.empty(len(source1_numbers), np.float32)
+    for i, (left, right) in enumerate(zip(source1_numbers, target_numbers)):
+        if not left or not right:
+            first_match[i] = jaccard[i] = -1.0
             continue
-        sx, sy = x.split(), y.split()
-        first_eq[i] = 1.0 if sx[0] in sy else 0.0
-        a, b = set(sx), set(sy)
-        jac[i] = len(a & b) / len(a | b)
-    return first_eq, jac
+        left_list, right_list = left.split(), right.split()
+        first_match[i] = 1.0 if left_list[0] in right_list else 0.0
+        left_set, right_set = set(left_list), set(right_list)
+        jaccard[i] = len(left_set & right_set) / len(left_set | right_set)
+    return first_match, jaccard
 
 
-def _concat_cover(core_a, core_b):
-    out = np.empty(len(core_a), np.float32)
-    for i, (a, b) in enumerate(zip(core_a, core_b)):
-        toks = [t for t in a.split() if len(t) >= 3]
-        if not toks:
-            out[i] = -1.0
+def joined_name_coverage(source1_cores, target_cores):
+    coverage = np.empty(len(source1_cores), np.float32)
+    for i, (source1_core, target_core) in enumerate(zip(source1_cores, target_cores)):
+        words = [w for w in source1_core.split() if len(w) >= 3]
+        if not words:
+            coverage[i] = -1.0
             continue
-        bb = b.replace(" ", "")
-        tot = sum(len(t) for t in toks)
-        out[i] = sum(len(t) for t in toks if t in bb) / tot
-    return out
+        joined = target_core.replace(" ", "")
+        total = sum(len(w) for w in words)
+        coverage[i] = sum(len(w) for w in words if w in joined) / total
+    return coverage
 
 
-def cheap_features(pairs, n1, nt):
-    q, t = pairs.q.values, pairs.t.values
-    ca = [n1["core"][i] for i in q]
-    cb = [nt["core"][i] for i in t]
-    aa = [n1["addr"][i] for i in q]
-    ab = [nt["addr"][i] for i in t]
-    f = pd.DataFrame({k: pairs[k].values for k in KEY_FEATS})
-    f["kratio"] = pairs.kscore.values / np.maximum(pairs.kbest.values, 1e-6)
-    f["core_tset"] = _cp(ca, cb, fuzz.token_set_ratio)
-    f["core_ratio"] = _cp(ca, cb, fuzz.ratio)
-    f["addr_tset"] = _cp(aa, ab, fuzz.token_set_ratio)
-    f["num_first"], f["num_jac"] = _num_feats([n1["nums"][i] for i in q], [nt["nums"][i] for i in t])
-    f["t_web"] = nt["web"][t].astype(np.int8)
-    f["t_script"] = nt["script"][t].astype(np.int8)
-    f["t_noaddr"] = np.array([not x for x in ab], dtype=np.int8)
-    return f
+def filter_features(pairs, source1, targets):
+    s1_idx, tgt_idx = pairs.source1.values, pairs.target.values
+    s1_core = [source1["core"][i] for i in s1_idx]
+    tgt_core = [targets["core"][i] for i in tgt_idx]
+    s1_addr = [source1["addr"][i] for i in s1_idx]
+    tgt_addr = [targets["addr"][i] for i in tgt_idx]
+    feats = pd.DataFrame({c: pairs[c].values for c in BLOCKING_COLUMNS})
+    feats["key_score_ratio"] = pairs.key_score.values / np.maximum(pairs.best_key_score.values, 1e-6)
+    feats["core_token_set"] = pairwise(s1_core, tgt_core, fuzz.token_set_ratio)
+    feats["core_ratio"] = pairwise(s1_core, tgt_core, fuzz.ratio)
+    feats["address_token_set"] = pairwise(s1_addr, tgt_addr, fuzz.token_set_ratio)
+    feats["first_number_match"], feats["number_jaccard"] = number_features(
+        [source1["nums"][i] for i in s1_idx], [targets["nums"][i] for i in tgt_idx])
+    feats["target_is_website"] = targets["web"][tgt_idx].astype(np.int8)
+    feats["target_is_indic_script"] = targets["script"][tgt_idx].astype(np.int8)
+    feats["target_has_no_address"] = np.array([not a for a in tgt_addr], dtype=np.int8)
+    return feats
 
 
-def add_q_context(X, pairs):
-    g = pd.DataFrame({"q": pairs.q.values, "s": pairs.kscore.values})
-    X["q_ncand"] = g.groupby("q").q.transform("size").values.astype(np.int32)
-    X["q_rank"] = g.groupby("q").s.rank(ascending=False, method="min").values.astype(np.float32)
-    return X
+def add_source1_context(feats, pairs):
+    frame = pd.DataFrame({"source1": pairs.source1.values, "score": pairs.key_score.values})
+    feats["source1_candidate_count"] = frame.groupby("source1").source1.transform("size").values.astype(np.int32)
+    feats["source1_candidate_rank"] = frame.groupby("source1").score.rank(
+        ascending=False, method="min").values.astype(np.float32)
+    return feats
 
 
-def _sigs(side):
-    nsig, asig = [], []
-    for core, addr, nums in zip(side["core"], side["addr"], side["nums"]):
-        nsig.append(" ".join(sorted(set(core.split()))))
-        sig = ""
+def record_signatures(records):
+    name_sigs, address_sigs = [], []
+    for core, addr, nums in zip(records["core"], records["addr"], records["nums"]):
+        name_sigs.append(" ".join(sorted(set(core.split()))))
+        signature = ""
         if nums:
-            toks = addr.split()
-            first = nums.split()[0]
-            for i, tk in enumerate(toks):
-                if tk.lstrip("0") == first or (tk[:1].isdigit() and first in tk):
-                    nxt = next((x for x in toks[i + 1:] if not x[:1].isdigit()), "")
-                    sig = first + "|" + nxt
+            words = addr.split()
+            house = nums.split()[0]
+            for i, word in enumerate(words):
+                if word.lstrip("0") == house or (word[:1].isdigit() and house in word):
+                    street = next((w for w in words[i + 1:] if not w[:1].isdigit()), "")
+                    signature = house + "|" + street
                     break
-        asig.append(sig)
-    return nsig, asig
+        address_sigs.append(signature)
+    return name_sigs, address_sigs
 
 
-def _h(strings):
+def hash_strings(strings):
     return pd.util.hash_array(np.array(strings, dtype=object))
 
 
-def signature_stats(n1, nt):
-    st = {}
-    for key, side in (("1", n1), ("t", nt)):
-        ns, as_ = _sigs(side)
-        hn, ha = _h(ns), _h(as_)
-        hc = _h([a + "#" + b for a, b in zip(ns, as_)])
-        ha[np.array([not x for x in as_])] = 0
-        st["hn" + key], st["ha" + key], st["hc" + key] = hn, ha, hc
-    for kind in ("hn", "ha", "hc"):
-        both = np.concatenate([st[kind + "1"], st[kind + "t"]])
-        u, inv = np.unique(both, return_inverse=True)
-        c1 = np.bincount(inv[:len(st[kind + "1"])], minlength=len(u))
-        ct = np.bincount(inv[len(st[kind + "1"]):], minlength=len(u))
-        st[kind + "_u"], st[kind + "_c1"], st[kind + "_ct"] = u, c1, ct
-    from collections import Counter
-    st["tok1"] = Counter(t for c in n1["core"] for t in set(c.split()))
-    st["tokt"] = Counter(t for c in nt["core"] for t in set(c.split()))
-    return st
+def frequency_tables(source1, targets):
+    tables = {}
+    for side, records in (("source1", source1), ("target", targets)):
+        name_sigs, address_sigs = record_signatures(records)
+        name_hash, address_hash = hash_strings(name_sigs), hash_strings(address_sigs)
+        combined_hash = hash_strings([n + "#" + a for n, a in zip(name_sigs, address_sigs)])
+        address_hash[np.array([not a for a in address_sigs], dtype=bool)] = 0
+        tables[("name", side)], tables[("address", side)] = name_hash, address_hash
+        tables[("combined", side)] = combined_hash
+    for kind in ("name", "address", "combined"):
+        s1_hash, tgt_hash = tables[(kind, "source1")], tables[(kind, "target")]
+        unique, inverse = np.unique(np.concatenate([s1_hash, tgt_hash]), return_inverse=True)
+        tables[(kind, "unique")] = unique
+        tables[(kind, "count_source1")] = np.bincount(inverse[:len(s1_hash)], minlength=len(unique))
+        tables[(kind, "count_target")] = np.bincount(inverse[len(s1_hash):], minlength=len(unique))
+    tables["word_df_source1"] = Counter(w for c in source1["core"] for w in set(c.split()))
+    tables["word_df_target"] = Counter(w for c in targets["core"] for w in set(c.split()))
+    return tables
 
 
-def _count(st, kind, h):
-    u = st[kind + "_u"]
-    pos = np.minimum(np.searchsorted(u, h), len(u) - 1)
-    ok = u[pos] == h
-    c1 = np.where(ok, st[kind + "_c1"][pos], 0)
-    ct = np.where(ok, st[kind + "_ct"][pos], 0)
-    return c1.astype(np.float32), ct.astype(np.float32)
+def signature_counts(tables, kind, hashes):
+    unique = tables[(kind, "unique")]
+    if len(unique) == 0:
+        return np.zeros(len(hashes), np.float32), np.zeros(len(hashes), np.float32)
+    pos = np.minimum(np.searchsorted(unique, hashes), len(unique) - 1)
+    found = unique[pos] == hashes
+    in_source1 = np.where(found, tables[(kind, "count_source1")][pos], 0)
+    in_targets = np.where(found, tables[(kind, "count_target")][pos], 0)
+    return in_source1.astype(np.float32), in_targets.astype(np.float32)
 
 
-def freq_features(pairs, n1, nt, st):
-    q, t = pairs.q.values, pairs.t.values
-    f = {}
-    for kind, nm in (("hn", "name"), ("ha", "addr"), ("hc", "combo")):
-        hq, ht = st[kind + "1"][q], st[kind + "t"][t]
-        f[f"{nm}_sig_eq"] = (hq == ht).astype(np.int8)
-        f[f"t_{nm}_s1cnt"], f[f"t_{nm}_tcnt"] = _count(st, kind, ht)
-        f[f"q_{nm}_s1cnt"], f[f"q_{nm}_tcnt"] = _count(st, kind, hq)
-        if kind == "ha":
-            miss = ht == 0
-            for c in ("t_addr_s1cnt", "t_addr_tcnt"):
-                f[c][miss] = -1
-    tok1, tokt = st["tok1"], st["tokt"]
-    d_tdf = np.empty(len(q), np.float32)
-    d_s1df = np.empty(len(q), np.float32)
-    n_extra = np.empty(len(q), np.int8)
-    n_missing = np.empty(len(q), np.int8)
-    for i, (a, b) in enumerate(zip(q.tolist(), t.tolist())):
-        sa, sb = set(n1["core"][a].split()), set(nt["core"][b].split())
-        extra = sb - sa
-        n_extra[i] = min(len(extra), 100)
-        n_missing[i] = min(len(sa - sb), 100)
+def frequency_features(pairs, source1, targets, tables):
+    s1_idx, tgt_idx = pairs.source1.values, pairs.target.values
+    feats = {}
+    for kind in ("name", "address", "combined"):
+        s1_hash = tables[(kind, "source1")][s1_idx]
+        tgt_hash = tables[(kind, "target")][tgt_idx]
+        feats[f"{kind}_signature_equal"] = (s1_hash == tgt_hash).astype(np.int8)
+        feats[f"target_{kind}_in_source1"], feats[f"target_{kind}_in_targets"] = \
+            signature_counts(tables, kind, tgt_hash)
+        feats[f"source1_{kind}_in_source1"], feats[f"source1_{kind}_in_targets"] = \
+            signature_counts(tables, kind, s1_hash)
+        if kind == "address":
+            missing = tgt_hash == 0
+            feats["target_address_in_source1"][missing] = -1
+            feats["target_address_in_targets"][missing] = -1
+    df_source1, df_target = tables["word_df_source1"], tables["word_df_target"]
+    extra_target_freq = np.empty(len(s1_idx), np.float32)
+    extra_source1_freq = np.empty(len(s1_idx), np.float32)
+    extra_count = np.empty(len(s1_idx), np.int8)
+    missing_count = np.empty(len(s1_idx), np.int8)
+    for i, (a, b) in enumerate(zip(s1_idx.tolist(), tgt_idx.tolist())):
+        s1_words = set(source1["core"][a].split())
+        tgt_words = set(targets["core"][b].split())
+        extra = tgt_words - s1_words
+        extra_count[i] = min(len(extra), 100)
+        missing_count[i] = min(len(s1_words - tgt_words), 100)
         if extra:
-            d_tdf[i] = max(tokt.get(x, 0) for x in extra)
-            d_s1df[i] = min(tok1.get(x, 0) for x in extra)
+            extra_target_freq[i] = max(df_target.get(w, 0) for w in extra)
+            extra_source1_freq[i] = min(df_source1.get(w, 0) for w in extra)
         else:
-            d_tdf[i] = d_s1df[i] = -1
-    f["extra_tok_max_tdf"], f["extra_tok_min_s1df"] = d_tdf, d_s1df
-    f["n_extra_tok"], f["n_missing_tok"] = n_extra, n_missing
-    return pd.DataFrame(f)
+            extra_target_freq[i] = extra_source1_freq[i] = -1
+    feats["extra_word_target_frequency"] = extra_target_freq
+    feats["extra_word_source1_frequency"] = extra_source1_freq
+    feats["extra_word_count"] = extra_count
+    feats["missing_word_count"] = missing_count
+    return pd.DataFrame(feats)
 
 
-def full_features(pairs, n1, nt, t_src, cheap=None, stats=None):
-    q, t = pairs.q.values, pairs.t.values
-    f = cheap_features(pairs, n1, nt) if cheap is None else cheap.copy()
-    ca = [n1["core"][i] for i in q]
-    cb = [nt["core"][i] for i in t]
-    na = [n1["name"][i] for i in q]
-    nb = [nt["name"][i] for i in t]
-    aa = [n1["addr"][i] for i in q]
-    ab = [nt["addr"][i] for i in t]
-    f["core_tsort"] = _cp(ca, cb, fuzz.token_sort_ratio)
-    f["core_partial"] = _cp(ca, cb, fuzz.partial_ratio)
-    f["core_jw"] = _cp(ca, cb, JaroWinkler.normalized_similarity)
-    f["name_ratio"] = _cp(na, nb, fuzz.ratio)
-    f["name_tset"] = _cp(na, nb, fuzz.token_set_ratio)
-    ca_ns = [x.replace(" ", "") for x in ca]
-    cb_ns = [x.replace(" ", "") for x in cb]
-    f["nospace_ratio"] = _cp(ca_ns, cb_ns, fuzz.ratio)
-    f["nospace_partial"] = _cp(ca_ns, cb_ns, fuzz.partial_ratio)
-    f["concat_cover"] = _concat_cover(ca, cb)
-    f["addr_ratio"] = _cp(aa, ab, fuzz.ratio)
-    f["addr_tsort"] = _cp(aa, ab, fuzz.token_sort_ratio)
-    f["addr_partial"] = _cp(aa, ab, fuzz.partial_ratio)
-    f["len_core_a"] = np.array([len(x.split()) for x in ca], np.int8)
-    f["len_core_b"] = np.array([len(x.split()) for x in cb], np.int8)
-    f["len_addr_a"] = np.array([len(x.split()) for x in aa], np.int16)
-    f["len_addr_b"] = np.array([len(x.split()) for x in ab], np.int16)
-    f["t_alias"] = nt["alias"][t].astype(np.int8)
-    f["is_s3"] = (t_src[t] == 3).astype(np.int8)
-    if stats is not None:
-        fr = freq_features(pairs, n1, nt, stats)
-        for c in fr.columns:
-            f[c] = fr[c].values
-    return f
+def matcher_features(pairs, source1, targets, target_source, filter_feats=None, tables=None):
+    s1_idx, tgt_idx = pairs.source1.values, pairs.target.values
+    feats = filter_features(pairs, source1, targets) if filter_feats is None else filter_feats.copy()
+    s1_core = [source1["core"][i] for i in s1_idx]
+    tgt_core = [targets["core"][i] for i in tgt_idx]
+    s1_name = [source1["name"][i] for i in s1_idx]
+    tgt_name = [targets["name"][i] for i in tgt_idx]
+    s1_addr = [source1["addr"][i] for i in s1_idx]
+    tgt_addr = [targets["addr"][i] for i in tgt_idx]
+    feats["core_token_sort"] = pairwise(s1_core, tgt_core, fuzz.token_sort_ratio)
+    feats["core_partial"] = pairwise(s1_core, tgt_core, fuzz.partial_ratio)
+    feats["core_jaro_winkler"] = pairwise(s1_core, tgt_core, JaroWinkler.normalized_similarity)
+    feats["name_ratio"] = pairwise(s1_name, tgt_name, fuzz.ratio)
+    feats["name_token_set"] = pairwise(s1_name, tgt_name, fuzz.token_set_ratio)
+    s1_joined = [c.replace(" ", "") for c in s1_core]
+    tgt_joined = [c.replace(" ", "") for c in tgt_core]
+    feats["joined_name_ratio"] = pairwise(s1_joined, tgt_joined, fuzz.ratio)
+    feats["joined_name_partial"] = pairwise(s1_joined, tgt_joined, fuzz.partial_ratio)
+    feats["joined_name_coverage"] = joined_name_coverage(s1_core, tgt_core)
+    feats["address_ratio"] = pairwise(s1_addr, tgt_addr, fuzz.ratio)
+    feats["address_token_sort"] = pairwise(s1_addr, tgt_addr, fuzz.token_sort_ratio)
+    feats["address_partial"] = pairwise(s1_addr, tgt_addr, fuzz.partial_ratio)
+    feats["source1_core_words"] = np.array([len(c.split()) for c in s1_core], np.int8)
+    feats["target_core_words"] = np.array([len(c.split()) for c in tgt_core], np.int8)
+    feats["source1_address_words"] = np.array([len(a.split()) for a in s1_addr], np.int16)
+    feats["target_address_words"] = np.array([len(a.split()) for a in tgt_addr], np.int16)
+    feats["target_has_alias"] = targets["alias"][tgt_idx].astype(np.int8)
+    feats["from_source3"] = (target_source[tgt_idx] == 3).astype(np.int8)
+    if tables is not None:
+        freq = frequency_features(pairs, source1, targets, tables)
+        for c in freq.columns:
+            feats[c] = freq[c].values
+    return feats

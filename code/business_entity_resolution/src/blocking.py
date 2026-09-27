@@ -1,185 +1,207 @@
 import os
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool
 
 import numpy as np
 import pandas as pd
 
-MAX_BLOCK = 40
-RARE_DF = 25
+MAX_BLOCK_SIZE = 40
+RARE_WORD_DF = 25
 WORKERS = max(1, (os.cpu_count() or 2) - 1)
 JOIN_THREADS = 8
-MIN_RATIO = 0.4
-_G = {}
+MIN_SCORE_RATIO = 0.4
+CANDIDATE_COLUMNS = ["target", "source1", "key_score", "shared_keys", "key_rank",
+                     "best_key_score", "source1_hits"]
+
+SOURCE1_WIDTHS = dict(name=5, address=8, numbers=3, words_per_number=99,
+                      cross_name=3, cross_address=6, name_number=3)
+TARGET_WIDTHS = dict(name=4, address=4, numbers=2, words_per_number=3,
+                     cross_name=2, cross_address=2, name_number=2)
+
+_worker_state = {}
 
 
-def _pairs(toks):
-    out = []
-    for i in range(len(toks)):
-        for j in range(i + 1, len(toks)):
-            a, b = toks[i], toks[j]
-            out.append(a + "|" + b if a < b else b + "|" + a)
-    return out
+def word_pairs(words):
+    pairs = []
+    for i in range(len(words)):
+        for j in range(i + 1, len(words)):
+            a, b = words[i], words[j]
+            pairs.append(a + "|" + b if a < b else b + "|" + a)
+    return pairs
 
 
-WIDE = dict(name=5, addr=8, nums=3, hn_tokens=99, x_name=3, x_addr=6, y_name=3)
-NARROW = dict(name=4, addr=4, nums=2, hn_tokens=3, x_name=2, x_addr=2, y_name=2)
-
-
-def segment(tok, vocab, min_piece=3):
-    n = len(tok)
-    best = [None] * (n + 1)
+def split_joined_word(word, vocabulary, min_piece=3):
+    n = len(word)
+    best: list[list[str] | None] = [None] * (n + 1)
     best[0] = []
-    for i in range(n):
-        if best[i] is None:
+    for start in range(n):
+        prev = best[start]
+        if prev is None:
             continue
-        for j in range(i + min_piece, n + 1):
-            piece = tok[i:j]
-            if piece in vocab and (best[j] is None or len(best[j]) > len(best[i]) + 1):
-                best[j] = best[i] + [piece]
-    return best[n] if best[n] and len(best[n]) >= 2 else []
+        for end in range(start + min_piece, n + 1):
+            piece = word[start:end]
+            if piece in vocabulary:
+                current = best[end]
+                candidate = prev + [piece]
+                if current is None or len(current) > len(prev) + 1:
+                    best[end] = candidate
+    result = best[n]
+    return result if result and len(result) >= 2 else []
 
 
-def name_tokens(core, ndf):
-    toks = set()
-    for t in core.split():
-        if t in ndf:
-            toks.add(t)
-        elif len(t) >= 7:
-            toks.update(segment(t, ndf))
-    return sorted(toks, key=lambda t: (ndf[t], t))
+def rare_name_words(core, name_df):
+    words = set()
+    for word in core.split():
+        if word in name_df:
+            words.add(word)
+        elif len(word) >= 7:
+            words.update(split_joined_word(word, name_df))
+    return sorted(words, key=lambda w: (name_df[w], w))
 
 
-def record_keys(core, addr, nums, ndf, adf, w):
-    nt = name_tokens(core, ndf)
-    at = sorted({t for t in addr.split() if t in adf and not t.isdigit()}, key=lambda t: (adf[t], t))
-    nums = nums.split()
+def build_keys(core, addr, nums, name_df, addr_df, widths):
+    name_words = rare_name_words(core, name_df)
+    addr_words = sorted({w for w in addr.split() if w in addr_df and not w.isdigit()},
+                        key=lambda w: (addr_df[w], w))
+    numbers = nums.split()
     keys = []
-    if len(nt) == 1:
-        keys.append("M" + nt[0])
-    keys += ["N" + p for p in _pairs(nt[:w["name"]])]
-    keys += ["U" + t for t in nt if ndf[t] <= RARE_DF]
-    keys += ["A" + p for p in _pairs(at[:w["addr"]])]
-    for n in nums[:w["nums"]]:
-        keys += ["H" + n + "|" + t for t in at[:w["hn_tokens"]]]
-        keys += ["Y" + t + "|" + n for t in nt[:w["y_name"]]]
-    keys += ["X" + a + "|" + b for a in nt[:w["x_name"]] for b in at[:w["x_addr"]]]
+    if len(name_words) == 1:
+        keys.append("M" + name_words[0])
+    keys += ["N" + p for p in word_pairs(name_words[:widths["name"]])]
+    keys += ["U" + w for w in name_words if name_df[w] <= RARE_WORD_DF]
+    keys += ["A" + p for p in word_pairs(addr_words[:widths["address"]])]
+    for number in numbers[:widths["numbers"]]:
+        keys += ["H" + number + "|" + w for w in addr_words[:widths["words_per_number"]]]
+        keys += ["Y" + w + "|" + number for w in name_words[:widths["name_number"]]]
+    keys += ["X" + a + "|" + b for a in name_words[:widths["cross_name"]]
+             for b in addr_words[:widths["cross_address"]]]
     return keys
 
 
-def _init(ndf, adf):
-    _G["ndf"], _G["adf"] = ndf, adf
+def _init_worker(name_df, addr_df):
+    _worker_state["name_df"], _worker_state["addr_df"] = name_df, addr_df
 
 
-def _work(args):
-    cores, addrs, nums, offset, wide = args
-    ndf, adf = _G["ndf"], _G["adf"]
-    w = WIDE if wide else NARROW
-    ks, own = [], []
-    for i, (c, a, n) in enumerate(zip(cores, addrs, nums)):
-        k = record_keys(c, a, n, ndf, adf, w)
-        ks += k
-        own += [offset + i] * len(k)
-    h = pd.util.hash_array(np.array(ks, dtype=object)) if ks else np.zeros(0, np.uint64)
-    return h, np.array(own, dtype=np.int64)
+def _keys_for_chunk(job):
+    cores, addrs, nums, offset, is_source1 = job
+    name_df, addr_df = _worker_state["name_df"], _worker_state["addr_df"]
+    widths = SOURCE1_WIDTHS if is_source1 else TARGET_WIDTHS
+    all_keys, owners = [], []
+    for i, (core, addr, num) in enumerate(zip(cores, addrs, nums)):
+        keys = build_keys(core, addr, num, name_df, addr_df, widths)
+        all_keys += keys
+        owners += [offset + i] * len(keys)
+    hashes = pd.util.hash_array(np.array(all_keys, dtype=object)) if all_keys else np.zeros(0, np.uint64)
+    return hashes, np.array(owners, dtype=np.int64)
 
 
-def _keys(pool, cores, addrs, nums, wide, size=40000):
-    jobs = [(cores[i:i + size], addrs[i:i + size], nums[i:i + size], i, wide)
-            for i in range(0, len(cores), size)]
-    res = pool.map(_work, jobs)
-    return (np.concatenate([r[0] for r in res]) if res else np.zeros(0, np.uint64),
-            np.concatenate([r[1] for r in res]) if res else np.zeros(0, np.int64))
+def compute_keys(pool, cores, addrs, nums, is_source1, chunk_size=40000):
+    jobs = [(cores[i:i + chunk_size], addrs[i:i + chunk_size], nums[i:i + chunk_size], i, is_source1)
+            for i in range(0, len(cores), chunk_size)]
+    results = pool.map(_keys_for_chunk, jobs)
+    if not results:
+        return np.zeros(0, np.uint64), np.zeros(0, np.int64)
+    return np.concatenate([r[0] for r in results]), np.concatenate([r[1] for r in results])
 
 
-def _df(strings):
-    from collections import Counter
-    c = Counter()
+def document_frequency(strings):
+    counts = Counter()
     for s in strings:
-        c.update(set(s.split()))
-    return dict(c)
+        counts.update(set(s.split()))
+    return dict(counts)
 
 
-def _topk_join(ukeys, starts, counts, idf, s1_of, tk, towner, k):
-    if len(ukeys) == 0 or len(tk) == 0:
+def join_top_candidates(block_keys, block_starts, block_sizes, block_weights, source1_by_key,
+                        target_keys, target_owner, top_k):
+    if len(block_keys) == 0 or len(target_keys) == 0:
         return None
-    pos = np.searchsorted(ukeys, tk)
-    pos = np.minimum(pos, len(ukeys) - 1)
-    ok = ukeys[pos] == tk
-    pos, own = pos[ok], towner[ok]
-    c = counts[pos]
-    rows = np.repeat(own, c)
-    w = np.repeat(idf[pos], c)
-    first = np.repeat(starts[pos] - np.r_[0, np.cumsum(c)[:-1]], c)
-    s1 = s1_of[first + np.arange(c.sum())]
-    if len(rows) == 0:
+    pos = np.minimum(np.searchsorted(block_keys, target_keys), len(block_keys) - 1)
+    found = block_keys[pos] == target_keys
+    pos, owner = pos[found], target_owner[found]
+    sizes = block_sizes[pos]
+    if sizes.sum() == 0:
         return None
-    code = rows.astype(np.int64) * (len(s1_of) + 1) + s1
-    uc, inv = np.unique(code, return_inverse=True)
-    score = np.bincount(inv, weights=w).astype(np.float32)
-    nkeys = np.bincount(inv).astype(np.int16)
-    t = (uc // (len(s1_of) + 1)).astype(np.int64)
-    q = (uc % (len(s1_of) + 1)).astype(np.int64)
-    order = np.lexsort((-score, t))
-    t, q, score, nkeys = t[order], q[order], score[order], nkeys[order]
-    grp_start = np.r_[0, np.flatnonzero(np.diff(t)) + 1]
-    rank = np.arange(len(t)) - np.repeat(grp_start, np.diff(np.r_[grp_start, len(t)]))
-    best = np.repeat(score[grp_start], np.diff(np.r_[grp_start, len(t)]))
-    n_hit = np.repeat(np.diff(np.r_[grp_start, len(t)]), np.diff(np.r_[grp_start, len(t)]))
-    keep = (rank < k) & ((rank == 0) | (score >= MIN_RATIO * best))
-    return pd.DataFrame({"t": t[keep], "q": q[keep], "kscore": score[keep], "nkeys": nkeys[keep],
-                         "krank": (rank[keep] + 1).astype(np.int16), "kbest": best[keep],
-                         "khits": n_hit[keep].astype(np.int32)})
+    target_rows = np.repeat(owner, sizes)
+    weights = np.repeat(block_weights[pos], sizes)
+    first = np.repeat(block_starts[pos] - np.r_[0, np.cumsum(sizes)[:-1]], sizes)
+    source1_rows = source1_by_key[first + np.arange(sizes.sum())]
+    base = len(source1_by_key) + 1
+    pair_code = target_rows.astype(np.int64) * base + source1_rows
+    unique_pairs, inverse = np.unique(pair_code, return_inverse=True)
+    score = np.bincount(inverse, weights=weights).astype(np.float32)
+    shared = np.bincount(inverse).astype(np.int16)
+    target = (unique_pairs // base).astype(np.int64)
+    source1 = (unique_pairs % base).astype(np.int64)
+    order = np.lexsort((-score, target))
+    target, source1, score, shared = target[order], source1[order], score[order], shared[order]
+    group_start = np.r_[0, np.flatnonzero(np.diff(target)) + 1]
+    group_size = np.diff(np.r_[group_start, len(target)])
+    rank = np.arange(len(target)) - np.repeat(group_start, group_size)
+    best = np.repeat(score[group_start], group_size)
+    hits = np.repeat(group_size, group_size)
+    keep = (rank < top_k) & ((rank == 0) | (score >= MIN_SCORE_RATIO * best))
+    return pd.DataFrame({"target": target[keep], "source1": source1[keep],
+                         "key_score": score[keep], "shared_keys": shared[keep],
+                         "key_rank": (rank[keep] + 1).astype(np.int16),
+                         "best_key_score": best[keep], "source1_hits": hits[keep].astype(np.int32)})
 
 
-def retrieve(n1, nt, c1, ct, k=5, chunk=1_000_000, log=print):
-    c1 = np.asarray(c1, dtype=object)
-    ct = np.asarray(ct, dtype=object)
-    keys1 = [x.strip().lower() for x in c1]
-    keyst = np.array([x.strip().lower() for x in ct], dtype=object)
-    keys1 = np.array(keys1, dtype=object)
+def find_candidates(source1, targets, source1_country, target_country, top_k=5,
+                    chunk=1_000_000, log=print):
+    s1_country = np.array([c.strip().lower() for c in source1_country], dtype=object)
+    tgt_country = np.array([c.strip().lower() for c in target_country], dtype=object)
     parts = []
-    for country in sorted(set(keys1.tolist())):
-        qi = np.flatnonzero(keys1 == country)
-        ti = np.flatnonzero((keyst == country) | (keyst == "")) if country else np.arange(len(keyst))
-        if len(qi) == 0 or len(ti) == 0:
+    for country in sorted(set(s1_country.tolist())):
+        s1_rows = np.flatnonzero(s1_country == country)
+        if country:
+            tgt_rows = np.flatnonzero((tgt_country == country) | (tgt_country == ""))
+        else:
+            tgt_rows = np.arange(len(tgt_country))
+        if len(s1_rows) == 0 or len(tgt_rows) == 0:
             continue
-        cores1 = [n1["core"][i] for i in qi]
-        addrs1 = [n1["addr"][i] for i in qi]
-        ndf, adf = _df(cores1), _df(addrs1)
-        with Pool(WORKERS, initializer=_init, initargs=(ndf, adf)) as pool:
-            t0 = time.time()
-            h1, o1 = _keys(pool, cores1, addrs1, [n1["nums"][i] for i in qi], True)
-            order = np.argsort(h1, kind="stable")
-            h1, o1 = h1[order], o1[order]
-            ukeys, starts, counts = np.unique(h1, return_index=True, return_counts=True)
-            keep = counts <= MAX_BLOCK
-            ukeys, starts, counts = ukeys[keep], starts[keep], counts[keep]
-            idf = np.log(len(qi) / counts).astype(np.float32)
-            log(f"[block] {country or '<empty>'}: S1={len(qi)} targets={len(ti)} "
-                f"S1 keys={len(h1)} blocks kept={len(ukeys)} ({keep.mean():.3f}) {time.time() - t0:.0f}s")
-            for s in range(0, len(ti), chunk):
-                tsel = ti[s:s + chunk]
-                t0 = time.time()
-                ht, ot = _keys(pool, [nt["core"][i] for i in tsel], [nt["addr"][i] for i in tsel],
-                               [nt["nums"][i] for i in tsel], False)
-                t1 = time.time()
-                cuts = np.searchsorted(ot, np.linspace(0, len(tsel), JOIN_THREADS + 1).astype(np.int64))
-                slices = [(ht[a:b], ot[a:b]) for a, b in zip(cuts[:-1], cuts[1:])]
-                del ht, ot
-                with ThreadPoolExecutor(JOIN_THREADS) as ex:
-                    rs = list(ex.map(lambda sl: _topk_join(ukeys, starts, counts, idf, o1,
-                                                           sl[0], sl[1], k), slices))
+        s1_cores = [source1["core"][i] for i in s1_rows]
+        s1_addrs = [source1["addr"][i] for i in s1_rows]
+        name_df, addr_df = document_frequency(s1_cores), document_frequency(s1_addrs)
+        with Pool(WORKERS, initializer=_init_worker, initargs=(name_df, addr_df)) as pool:
+            started = time.time()
+            s1_hashes, s1_owner = compute_keys(pool, s1_cores, s1_addrs,
+                                               [source1["nums"][i] for i in s1_rows], True)
+            order = np.argsort(s1_hashes, kind="stable")
+            s1_hashes, s1_owner = s1_hashes[order], s1_owner[order]
+            block_keys, block_starts, block_sizes = np.unique(s1_hashes, return_index=True,
+                                                              return_counts=True)
+            small = block_sizes <= MAX_BLOCK_SIZE
+            block_keys, block_starts, block_sizes = block_keys[small], block_starts[small], block_sizes[small]
+            block_weights = np.log(len(s1_rows) / block_sizes).astype(np.float32)
+            log(f"[block] {country or '<empty>'}: S1={len(s1_rows)} targets={len(tgt_rows)} "
+                f"S1 keys={len(s1_hashes)} blocks kept={len(block_keys)} ({small.mean():.3f}) "
+                f"{time.time() - started:.0f}s")
+            for start in range(0, len(tgt_rows), chunk):
+                batch = tgt_rows[start:start + chunk]
+                started = time.time()
+                tgt_hashes, tgt_owner = compute_keys(pool, [targets["core"][i] for i in batch],
+                                                     [targets["addr"][i] for i in batch],
+                                                     [targets["nums"][i] for i in batch], False)
+                keyed = time.time()
+                cuts = np.searchsorted(tgt_owner, np.linspace(0, len(batch), JOIN_THREADS + 1).astype(np.int64))
+                slices = [(tgt_hashes[a:b], tgt_owner[a:b]) for a, b in zip(cuts[:-1], cuts[1:])]
+                del tgt_hashes, tgt_owner
+                with ThreadPoolExecutor(JOIN_THREADS) as executor:
+                    results = list(executor.map(
+                        lambda part: join_top_candidates(block_keys, block_starts, block_sizes,
+                                                         block_weights, s1_owner, part[0], part[1],
+                                                         top_k), slices))
                 del slices
-                log(f"[block]   targets {s}-{s + len(tsel)}: keys {t1 - t0:.0f}s "
-                    f"join {time.time() - t1:.0f}s")
-                for r in rs:
-                    if r is None:
+                log(f"[block]   targets {start}-{start + len(batch)}: keys {keyed - started:.0f}s "
+                    f"join {time.time() - keyed:.0f}s")
+                for result in results:
+                    if result is None:
                         continue
-                    r["t"] = tsel[r.t.values]
-                    r["q"] = qi[r.q.values]
-                    parts.append(r)
+                    result["target"] = batch[result["target"].to_numpy(dtype=np.intp)]
+                    result["source1"] = s1_rows[result["source1"].to_numpy(dtype=np.intp)]
+                    parts.append(result)
     if not parts:
-        return pd.DataFrame(columns=["t", "q", "kscore", "nkeys", "krank", "kbest", "khits"])
+        return pd.DataFrame({c: np.zeros(0, np.int64) for c in CANDIDATE_COLUMNS})
     return pd.concat(parts, ignore_index=True)
