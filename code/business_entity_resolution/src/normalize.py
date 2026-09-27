@@ -114,8 +114,11 @@ def name_parts(raw, native):
     return " ".join(toks), " ".join(core), alias, web, script
 
 
+NUMERO = re.compile(r"\b[Nn]\s*[°º]")
+
+
 def addr_parts(raw, native, syn):
-    s = fold(latinize(raw, native)).replace("n°", " no ").replace("#", " no ")
+    s = fold(latinize(NUMERO.sub(" no ", raw), native)).replace("#", " no ")
     s = DOTTED.sub(r"\1", s)
     toks, seen = [], set()
     nums = []

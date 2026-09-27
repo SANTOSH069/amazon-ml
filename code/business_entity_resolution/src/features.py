@@ -9,6 +9,7 @@ KEY_FEATS = ["kscore", "nkeys", "krank", "kbest", "khits"]
 def _cp(a, b, scorer):
     return process.cpdist(a, b, scorer=scorer, workers=-1, dtype=np.float32)
 
+
 def _num_feats(na, nb):
     first_eq = np.empty(len(na), np.float32)
     jac = np.empty(len(na), np.float32)
@@ -22,8 +23,8 @@ def _num_feats(na, nb):
         jac[i] = len(a & b) / len(a | b)
     return first_eq, jac
 
-def _concat_cover(core_a, core_b):
 
+def _concat_cover(core_a, core_b):
     out = np.empty(len(core_a), np.float32)
     for i, (a, b) in enumerate(zip(core_a, core_b)):
         toks = [t for t in a.split() if len(t) >= 3]
@@ -34,6 +35,7 @@ def _concat_cover(core_a, core_b):
         tot = sum(len(t) for t in toks)
         out[i] = sum(len(t) for t in toks if t in bb) / tot
     return out
+
 
 def cheap_features(pairs, n1, nt):
     q, t = pairs.q.values, pairs.t.values
@@ -52,14 +54,15 @@ def cheap_features(pairs, n1, nt):
     f["t_noaddr"] = np.array([not x for x in ab], dtype=np.int8)
     return f
 
+
 def add_q_context(X, pairs):
     g = pd.DataFrame({"q": pairs.q.values, "s": pairs.kscore.values})
     X["q_ncand"] = g.groupby("q").q.transform("size").values.astype(np.int32)
     X["q_rank"] = g.groupby("q").s.rank(ascending=False, method="min").values.astype(np.float32)
     return X
 
-def _sigs(side):
 
+def _sigs(side):
     nsig, asig = [], []
     for core, addr, nums in zip(side["core"], side["addr"], side["nums"]):
         nsig.append(" ".join(sorted(set(core.split()))))
@@ -75,8 +78,10 @@ def _sigs(side):
         asig.append(sig)
     return nsig, asig
 
+
 def _h(strings):
     return pd.util.hash_array(np.array(strings, dtype=object))
+
 
 def signature_stats(n1, nt):
     st = {}
@@ -97,6 +102,7 @@ def signature_stats(n1, nt):
     st["tokt"] = Counter(t for c in nt["core"] for t in set(c.split()))
     return st
 
+
 def _count(st, kind, h):
     u = st[kind + "_u"]
     pos = np.minimum(np.searchsorted(u, h), len(u) - 1)
@@ -104,6 +110,7 @@ def _count(st, kind, h):
     c1 = np.where(ok, st[kind + "_c1"][pos], 0)
     ct = np.where(ok, st[kind + "_ct"][pos], 0)
     return c1.astype(np.float32), ct.astype(np.float32)
+
 
 def freq_features(pairs, n1, nt, st):
     q, t = pairs.q.values, pairs.t.values
@@ -135,6 +142,7 @@ def freq_features(pairs, n1, nt, st):
     f["extra_tok_max_tdf"], f["extra_tok_min_s1df"] = d_tdf, d_s1df
     f["n_extra_tok"], f["n_missing_tok"] = n_extra, n_missing
     return pd.DataFrame(f)
+
 
 def full_features(pairs, n1, nt, t_src, cheap=None, stats=None):
     q, t = pairs.q.values, pairs.t.values

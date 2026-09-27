@@ -47,11 +47,15 @@ def _predict(model, X, chunk=4_000_000):
 
 
 def _in_chunks(fn, pairs, chunk=5_000_000):
+    if len(pairs) == 0:
+        return fn(pairs)
     return pd.concat([fn(pairs.iloc[i:i + chunk]) for i in range(0, len(pairs), chunk)],
                      ignore_index=True)
 
 
 def assign(t, q, p):
+    if len(t) == 0:
+        return t, q, p
     order = np.lexsort((-p, t))
     t, q, p = t[order], q[order], p[order]
     first = np.r_[True, t[1:] != t[:-1]]
@@ -202,7 +206,7 @@ class Resolver:
         X = pd.concat([full_features(cand.iloc[i:i + chunk], n1, nt, t_src,
                                      cheap=cheap.iloc[i:i + chunk].reset_index(drop=True),
                                      stats=st)
-                       for i in range(0, len(cand), chunk)], ignore_index=True)
+                       for i in range(0, max(len(cand), 1), chunk)], ignore_index=True)
         X = add_q_context(X, cand)
         self.log(f"[features] {X.shape} {time.time() - t0:.0f}s")
         return X

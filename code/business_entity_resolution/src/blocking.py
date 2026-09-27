@@ -8,7 +8,6 @@ import pandas as pd
 
 MAX_BLOCK = 40
 RARE_DF = 25
-TOP_NAME, TOP_ADDR = 4, 4
 WORKERS = max(1, (os.cpu_count() or 2) - 1)
 JOIN_THREADS = 8
 MIN_RATIO = 0.4
@@ -102,7 +101,9 @@ def _df(strings):
     return dict(c)
 
 
-def _topk_join(ukeys, starts, counts, idf, s1_of, tk, towner, n_t, k):
+def _topk_join(ukeys, starts, counts, idf, s1_of, tk, towner, k):
+    if len(ukeys) == 0 or len(tk) == 0:
+        return None
     pos = np.searchsorted(ukeys, tk)
     pos = np.minimum(pos, len(ukeys) - 1)
     ok = ukeys[pos] == tk
@@ -165,11 +166,12 @@ def retrieve(n1, nt, c1, ct, k=5, chunk=1_000_000, log=print):
                                [nt["nums"][i] for i in tsel], False)
                 t1 = time.time()
                 cuts = np.searchsorted(ot, np.linspace(0, len(tsel), JOIN_THREADS + 1).astype(np.int64))
-                with ThreadPoolExecutor(JOIN_THREADS) as ex:
-                    rs = list(ex.map(lambda ab: _topk_join(ukeys, starts, counts, idf, o1,
-                                                           ht[ab[0]:ab[1]], ot[ab[0]:ab[1]], 0, k),
-                                     zip(cuts[:-1], cuts[1:])))
+                slices = [(ht[a:b], ot[a:b]) for a, b in zip(cuts[:-1], cuts[1:])]
                 del ht, ot
+                with ThreadPoolExecutor(JOIN_THREADS) as ex:
+                    rs = list(ex.map(lambda sl: _topk_join(ukeys, starts, counts, idf, o1,
+                                                           sl[0], sl[1], k), slices))
+                del slices
                 log(f"[block]   targets {s}-{s + len(tsel)}: keys {t1 - t0:.0f}s "
                     f"join {time.time() - t1:.0f}s")
                 for r in rs:

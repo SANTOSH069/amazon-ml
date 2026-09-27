@@ -11,9 +11,11 @@ COLS = ["entity_id", "business_name", "business_address", "country"]
 def _read_tsv(path):
     with open(path, "rb") as fh:
         header = fh.readline().decode("utf-8-sig").rstrip("\r\n").split("\t")
+    header = [c.strip() for c in header]
     t = pacsv.read_csv(
         path,
-        read_options=pacsv.ReadOptions(use_threads=True, block_size=1 << 26),
+        read_options=pacsv.ReadOptions(use_threads=True, block_size=1 << 26,
+                                       column_names=header, skip_rows=1),
         parse_options=pacsv.ParseOptions(delimiter="\t", quote_char=False, newlines_in_values=False),
         convert_options=pacsv.ConvertOptions(column_types={c: pa.string() for c in header},
                                              strings_can_be_null=False))

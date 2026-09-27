@@ -3,7 +3,7 @@ from multiprocessing import Pool
 
 import numpy as np
 
-from normalize import addr_parts, name_parts, ADDR_CANON, TOKEN, fold, latinize
+from normalize import addr_parts, name_parts
 
 WORKERS = max(1, (os.cpu_count() or 2) - 1)
 _G = {}
