@@ -26,7 +26,8 @@ def main():
     t0 = time.time()
     here = os.path.dirname(os.path.abspath(__file__))
     project = os.path.dirname(here)
-    data_dir = args.data_dir or find_data_dir([os.getcwd(), project, os.path.dirname(project)])
+    submission_root = os.path.dirname(os.path.dirname(project))
+    data_dir = args.data_dir or find_data_dir([os.getcwd(), project, submission_root])
     if data_dir is None:
         print("No dataset found. Pass --data-dir <folder containing train/ and test/>.")
         return 2

@@ -1,7 +1,6 @@
 import re
 import unicodedata
 from collections import Counter, defaultdict
-
 from translit import INDIC_RE, has_indic, romanize_word
 
 NAME_CANON = {
